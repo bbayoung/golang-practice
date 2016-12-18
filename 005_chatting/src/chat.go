@@ -15,10 +15,14 @@ var (
 	publish     = make(chan Event, 10)                 // 이벤트 발행 채널
 )
 
+var userChatroomMap = make(map[string]string)
+var defaultChatroom = "A"
+
 // 채팅 이벤트 구조체 정의
 type Event struct {
 	EvtType   string  // 이벤트 타입
 	User      string  // 사용자 이름
+	Chatroom  string  // 채팅방 이름
 	Timestamp int     // 시간 값
 	Text      string  // 메시지 텍스트
 }
@@ -31,8 +35,8 @@ type Subscription struct {
 }
 
 // 이벤트 생성 함수
-func NewEvent(evtType, user, msg string) Event {
-	return Event{evtType, user, int(time.Now().Unix()), msg}
+func NewEvent(evtType, user, chatroom, msg string) Event {
+	return Event{evtType, user, chatroom, int(time.Now().Unix()), msg}
 }
 
 // 새로운 사용자가 들어왔을 때 이벤트를 구독할 함수
@@ -59,18 +63,19 @@ func (s Subscription) Cancel() {
 }
 
 // 사용자가 들어왔을 때 이벤트 발행
-func Join(user string) {
-	publish <- NewEvent("join", user, "")
+func Join(user, chatroom string) {
+	publish <- NewEvent("join", user, chatroom, "")
+	userChatroomMap[user] = chatroom // 맵에 유저별 채팅룸 이름을 저장
 }
 
 // 사용자가 채팅 메시지를 보냈을 때 이벤트 발행
 func Say(user, message string) {
-	publish <- NewEvent("message", user, message)
+	publish <- NewEvent("message", user, userChatroomMap[user], message)
 }
 
 // 사용자가 나갔을 때 이벤트 발행
 func Leave(user string) {
-	publish <- NewEvent("leave", user, "")
+	publish <- NewEvent("leave", user, userChatroomMap[user], "")
 }
 
 // 구독, 구독 해지, 발행 된 이벤트를 처리할 함수
@@ -107,7 +112,7 @@ func Chatroom() {
 			}
 
 		// 저장된 이벤트 개수가 20개가 넘으면
-			if archive.Len() >= 20 {
+			if archive.Len() >= 100 {
 				archive.Remove(archive.Front()) // 이벤트 삭제
 			}
 			archive.PushBack(event) // 현재 이벤트를 저장
@@ -137,17 +142,24 @@ func main() {
 	server.On("connection", func(so socketio.Socket) {
 		// 웹 브라우저가 접속되면
 		s := Subscribe() // 구독 처리
-		Join(so.Id())    // 사용자가 채팅방에 들어왔다는 이벤트 발행
+		Join(so.Id(), defaultChatroom)  // 사용자가 채팅방에 들어왔다는 이벤트 발행
+		// 처음에는 모두 A Chartroom 으로 가입.
 
 		for _, event := range s.Archive { // 지금까지 쌓인 이벤트를
 			so.Emit("event", event)   // 웹 브라우저로 접속한 사용자에게 보냄
 		}
 
 		newMessages := make(chan string)
+		changeChatroom := make(chan string)
 
 		// 웹 브라우저에서 보내오는 채팅 메시지를 받을 수 있도록 콜백 설정
 		so.On("message", func(msg string) {
 			newMessages <- msg
+		})
+
+		// 웹 브라우저에서 보내오는 채팅방 이동을 받을 수 있도록 콜백 설정
+		so.On("changeChatroom", func(chatroom string) {
+			changeChatroom <- chatroom
 		})
 
 		// 웹 브라우저의 접속이 끊어졌을 때 콜백 설정
@@ -164,6 +176,10 @@ func main() {
 
 				case msg := <-newMessages:      // 웹 브라우저에서 채팅 메시지를 보내오면
 					Say(so.Id(), msg)       // 채팅 메시지 이벤트 발행
+
+				case chatroom := <-changeChatroom:      // 채팅방이 바뀌면
+					Leave(so.Id())                  // 기존 채팅방에서 나가고
+					Join(so.Id(), chatroom)         // 새로운 채팅방으로 Join
 				}
 			}
 		}()
